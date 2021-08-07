@@ -8,7 +8,7 @@ export const DEFAULT_TIMEOUT_PARAM: TimeoutParams = {
     maxTimeout: DEFAULT_MAX_TIMEOUT,
 };
 
-export function timer({ action, timeout, onTimeout, addTimer }: TimerParams): Cancel {
+export function timer({ action, timeout, onTimeout }: TimerParams): Cancel {
     const timeoutPeriod = typeof timeout === 'function' ? timeout() : timeout;
     if (typeof timeoutPeriod !== 'number' || isNaN(timeoutPeriod)) {
         throw new Error(`Unexpected timeout value: ${timeoutPeriod}`);
@@ -17,30 +17,24 @@ export function timer({ action, timeout, onTimeout, addTimer }: TimerParams): Ca
     function cancelTimer() {
         clearTimeout(cancelTimeoutHandle);
     }
-    function cancelTimerAndNotify() {
-        cancelTimer();
-        onTimeout(cancelTimer);
-    }
-    const cancelRetries = addTimer(cancelTimerAndNotify);
-    const cancelAction = action(cancelRetries);
+    const cancelAction = action(cancelTimer);
     function cancelActionAndNotify() {
         cancelAction();
-        onTimeout(cancelTimer);
+        onTimeout();
     }
     function cancelTimerAndAction() {
         cancelAction();
         cancelTimer();
-        return cancelTimer;
     }
     return cancelTimerAndAction;
 }
 
-export function retry(retryParams: RetryParams & TimerParams): Cancel {
-    const { retryCount, onTimeout: onRetryTimeout } = retryParams;
+export function retry(retryParams: RetryParams): Cancel {
+    const { retryCount, onTimeout: onRetryTimeout, action: retryAction } = retryParams;
     let count = 0;
     let cancelTimer = () => {};
     function runRetry() {
-        cancelTimer = timer({ ...retryParams, onTimeout });
+        cancelTimer = timer({ ...retryParams, onTimeout, action });
     }
     function onTimeout() {
         if (++count < retryCount || retryCount < 0) {
@@ -49,13 +43,14 @@ export function retry(retryParams: RetryParams & TimerParams): Cancel {
             onRetryTimeout();
         }
     }
+    function action(cancel: Cancel): Cancel {}
     runRetry();
     return function cancelRetry() {
         cancelTimer();
     };
 }
 
-export function retryUntil({ globalTimeout, ...retryParams }: RetryUntilParams & TimerParams): Cancel {
+/*export function retryUntil({ globalTimeout, ...retryParams }: RetryUntilParams & TimerParams): Cancel {
     const timers = new Set<Cancel>();
 
     function cancelTimers() {
@@ -92,7 +87,7 @@ export function retryUntil({ globalTimeout, ...retryParams }: RetryUntilParams &
     });
 
     return cancelTimers;
-}
+} */
 
 export function getTimeout({
     baseTimeout = DEFAULT_TIMEOUT,

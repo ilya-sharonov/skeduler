@@ -11,17 +11,13 @@ export type Notify = (cancelTimer?: Cancel) => void;
 export type Remove = () => void;
 export type AddTimer = (cancelTimer: Cancel) => Cancel;
 
-export interface RepeatParams {
+export interface TimerParams {
     timeout: number | TimeoutFn;
     onTimeout: Notify;
-}
-
-export interface TimerParams extends RepeatParams {
     action: Action;
-    addTimer: AddTimer;
 }
 
-export interface RetryParams extends RepeatParams {
+export interface RetryParams extends TimerParams {
     retryCount: number;
 }
 
