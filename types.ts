@@ -13,14 +13,14 @@ export type AddTimer = (cancelTimer: Cancel) => Cancel;
 
 export interface TimerParams {
     timeout: number | TimeoutFn;
-    onTimeout: Notify;
-    action: Action;
+    origin?: Symbol;
+    target?: Symbol[];
 }
 
 export interface RetryParams extends TimerParams {
-    retryCount: number;
+    maxRetries: number;
 }
 
 export interface RetryUntilParams extends RetryParams {
-    globalTimeout: number;
+    maxTimeout: number;
 }
