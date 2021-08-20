@@ -1,4 +1,4 @@
-import { TimeoutParams, TimerParams, Cancel, RetryParams, RetryUntilParams, TimeoutFn } from './types';
+import { TimeoutParams, TimerParams, RetryParams, TimeoutFn } from './types';
 
 export const DEFAULT_TIMEOUT = 1000;
 export const DEFAULT_MAX_TIMEOUT = 3000;
@@ -11,14 +11,17 @@ export const DEFAULT_TIMEOUT_PARAM: TimeoutParams = {
 export const DEFAULT_TIMEOUT_ORIGIN = Symbol.for('DEFAULT_TIMEOUT_ORIGIN');
 export const DEFAULT_RETRY_ORIGIN = Symbol.for('DEFAULT_RETRY_ORIGIN');
 
-export enum SIGNAL {
-    TERMINATE = 'SIGNAL_TERMINATE',
-    FINISHED = 'SIGNAL_FINISHED',
+export enum Sig {
+    Terminate = 'SIGNAL_TERMINATE',
+    Finished = 'SIGNAL_FINISHED',
+    Reschedule = 'SIGNAL_RESCHEDULE',
+    Failed = 'SIGNAL_FAILED',
 }
-export interface Signal {
-    type: SIGNAL;
+export interface Signal<M = number> {
+    type: Sig;
     origin: Symbol;
     target: Symbol[];
+    metadata?: M;
 }
 
 export type SignalHandler = (signal: Signal) => void;
@@ -27,6 +30,21 @@ export interface Signals {
     addSignalsListener: (handler: SignalHandler) => void;
     removeSignalsListener: (handler: SignalHandler) => void;
     signal: (signal: Signal) => void;
+}
+
+export function initSignals(): Signals {
+    const signalHandlers = new Set<SignalHandler>();
+    return {
+        addSignalsListener(handler) {
+            signalHandlers.add(handler);
+        },
+        removeSignalsListener(handler) {
+            signalHandlers.delete(handler);
+        },
+        signal(sig) {
+            signalHandlers.forEach(handler => handler(sig));
+        },
+    };
 }
 
 export function timer(this: Signals, params: TimerParams) {
@@ -39,7 +57,7 @@ export function timer(this: Signals, params: TimerParams) {
         if (signal.origin === origin) {
             return;
         }
-        if (signal.type === SIGNAL.TERMINATE && (signal.target.includes(origin) || signal.target.length === 0)) {
+        if (signal.type === Sig.Terminate && (signal.target.includes(origin) || signal.target.length === 0)) {
             cancelTimeout();
             this.removeSignalsListener(signalsListener);
         }
@@ -48,7 +66,7 @@ export function timer(this: Signals, params: TimerParams) {
     const onTimeout = () => {
         this.removeSignalsListener(signalsListener);
         this.signal({
-            type: SIGNAL.FINISHED,
+            type: Sig.Finished,
             origin,
             target,
         });
@@ -73,14 +91,14 @@ export function retry(this: Signals, params: RetryParams) {
     };
     const signalStopTimeout = () => {
         this.signal({
-            type: SIGNAL.TERMINATE,
+            type: Sig.Terminate,
             origin: retryTarget,
             target: [timeoutOrigin],
         });
     };
     const signalFinished = () => {
         this.signal({
-            type: SIGNAL.FINISHED,
+            type: Sig.Finished,
             origin,
             target,
         });
@@ -102,12 +120,12 @@ export function retry(this: Signals, params: RetryParams) {
             return;
         }
         switch (signal.type) {
-            case SIGNAL.FINISHED: {
+            case Sig.Finished: {
                 if (signal.origin === timeoutOrigin) {
                     runRetry();
                 }
             }
-            case SIGNAL.TERMINATE: {
+            case Sig.Terminate: {
                 if (signal.target.includes(origin) || signal.target.length === 0) {
                     signalStopTimeout();
                     removeListener();
@@ -121,45 +139,6 @@ export function retry(this: Signals, params: RetryParams) {
     this.addSignalsListener(signalsListener);
     runRetry();
 }
-
-/*export function retryUntil({ globalTimeout, ...retryParams }: RetryUntilParams & TimerParams): Cancel {
-    const timers = new Set<Cancel>();
-
-    function cancelTimers() {
-        timers.forEach(fn => fn());
-        timers.clear();
-    }
-
-    function addTimer(cancelTimer: Cancel): Cancel {
-        timers.add(cancelTimer);
-        return cancelTimers;
-    }
-
-    function onTimeout(cancelTimer?: Cancel) {
-        if (cancelTimer !== undefined) {
-            timers.delete(cancelTimer);
-        }
-    }
-
-    function onGlobalTimeout(cancelTimer?: Cancel) {
-        onTimeout(cancelTimer);
-        cancelTimers();
-    }
-
-    timer({
-        action: () => () => {},
-        timeout: globalTimeout,
-        onTimeout: onGlobalTimeout,
-        addTimer,
-    });
-    retry({
-        ...retryParams,
-        onTimeout,
-        addTimer,
-    });
-
-    return cancelTimers;
-} */
 
 export function getTimeout({
     baseTimeout = DEFAULT_TIMEOUT,
