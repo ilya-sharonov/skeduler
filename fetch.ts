@@ -1,9 +1,9 @@
-import { timer, retry, Signals, Signal, Sig, DEFAULT_TIMEOUT } from './skeduler';
-import { TimerParams, RetryParams, RetryUntilParams, SignalParams } from './types';
+import { timer, retry, Signals, DEFAULT_TIMEOUT, createSignals, getTimeout } from './skeduler';
+import { TimerParams, RetryParams, RetryUntilParams } from './types';
+import fetch from 'node-fetch';
+import AbortController from 'abort-controller';
 
 export type GetResponse = () => Promise<Response>;
-
-export const DEFAULT_FETCH_ORIGIN = Symbol.for('DEFAULT_FETCH_ORIGIN');
 
 /*
     429 + 503 -> Retry-After header (in seconds)
@@ -27,12 +27,10 @@ export enum HttpStatus {
     LoopDetected = 508,
 }
 
-export const RETRY_AFTER = 'Retry-After';
-export interface FetchParams extends SignalParams {
+export const RETRY_AFTER_HEADER = 'Retry-After';
+export interface FetchParams {
     url: string;
-    fetchParams: RequestInit;
-    responseHandler?: (this: Signals, response: Response) => Response;
-    errorHandler?: (this: Signals, error: any) => void;
+    fetchParams?: RequestInit;
 }
 
 function getRescheduleTimeout(retryAfter: string | null): number {
@@ -60,71 +58,156 @@ function getRescheduleTimeout(retryAfter: string | null): number {
  * @param response
  * @returns
  */
-function handleResponse(this: Signals, origin: Symbol, target: Symbol[], response: Response): Response {
+function handleResponse(this: Signals, response: Response): Response {
     if (response.ok) {
+        this.completed(response);
         return response;
     }
     const { status, headers, statusText } = response;
     switch (true) {
         case status === HttpStatus.TooManyRequests: {
-            if (headers.has(RETRY_AFTER)) {
-                this.signal({
-                    type: Sig.Reschedule,
-                    origin,
-                    target,
-                    metadata: getRescheduleTimeout(headers.get(RETRY_AFTER)),
+            if (headers.has(RETRY_AFTER_HEADER)) {
+                this.terminated({
+                    retryAfter: getRescheduleTimeout(headers.get(RETRY_AFTER_HEADER)),
                 });
                 break;
             }
         }
         case status === HttpStatus.ServiceUnavailable: {
-            if (headers.has(RETRY_AFTER)) {
-                this.signal({
-                    type: Sig.Reschedule,
-                    origin,
-                    target,
-                    metadata: getRescheduleTimeout(headers.get(RETRY_AFTER)),
+            if (headers.has(RETRY_AFTER_HEADER)) {
+                this.terminated({
+                    retryAfter: getRescheduleTimeout(headers.get(RETRY_AFTER_HEADER)),
                 });
                 break;
             }
         }
         case status >= 400 && status <= 499: {
-            this.signal({
-                type: Sig.Terminate,
-                origin,
-                target,
-            });
+            this.terminated();
             break;
         }
         case status >= 500 && status <= 599: {
-            this.signal({
-                type: Sig.Failed,
-                origin,
-                target,
-            });
+            this.failed();
             throw new Error(`Server reported error ${statusText} with status code: ${status}`);
         }
         default: {
-            // noop
+            break;
         }
     }
     return response;
 }
 
-function fetch(this: Signals, params: FetchParams) {
-    const { url, fetchParams, origin = DEFAULT_FETCH_ORIGIN, target = [] } = params;
-    const abortController = new AbortController();
+function* nextFetch(params: FetchParams) {
+    const { url, fetchParams } = params;
+    let abortController: AbortController;
+    let abort = false;
 
     function cancelFetch() {
         abortController.abort();
     }
 
-    function signalsListener(signal: Signal) {
-        if (signal.origin === origin) {
-            return;
-        }
-        if (signal.type === Sig.Terminate && (signal.target.includes(origin) || signal.target.length === 0)) {
-            cancelFetch();
-        }
+    function produceFetch() {
+        abortController = new AbortController();
+        return {
+            //@ts-ignore
+            fetch: fetch(url, { ...fetchParams, signal: abortController.signal }),
+            cancelFetch,
+        };
     }
+
+    while (!abort) {
+        abort = yield produceFetch();
+    }
+
+    return produceFetch();
 }
+
+function getProxyThis(thisRef: any = {}) {
+    let thisObj = thisRef;
+    const proxyThis = new Proxy<any>(createSignals(thisRef), {
+        get(target: any, prop: string) {
+            if (prop in thisObj) {
+                return thisObj[prop];
+            }
+            return target[prop];
+        },
+    });
+    return [
+        proxyThis,
+        function updateRef(newRef: any) {
+            thisObj = newRef;
+            console.log('Proxy updated', newRef);
+        },
+    ];
+}
+
+function fetchRetry(params: FetchParams & RetryParams) {
+    const fetching = nextFetch(params);
+    const [proxyThis, updateProxyThis] = getProxyThis();
+    return new Promise((resolve, reject) => {
+        const { cancel: cancelRetry } = retry.call(proxyThis, params);
+        (function runFetch() {
+            console.log('Init fetch...');
+            const {
+                value: { fetch, cancelFetch },
+            } = fetching.next();
+            const timerSignals = {
+                completed() {
+                    cancelFetch();
+                    reject('Timeout');
+                },
+                next() {
+                    console.log('next phase');
+                    cancelFetch();
+                    runFetch();
+                },
+            };
+            updateProxyThis(timerSignals);
+            const fetchSignals = {
+                completed(response: Response) {
+                    cancelRetry();
+                    resolve(response);
+                },
+                terminated(reason: any) {
+                    cancelRetry();
+                    reject(reason);
+                },
+                failed() {
+                    console.log('Fetch failed');
+                },
+            };
+            //@ts-ignore
+            fetch.then(handleResponse.bind(createSignals(fetchSignals))).catch(() => {});
+        })();
+    });
+}
+
+const requestParams = {
+    url: 'http://www.boogle.com',
+    maxRetries: 3,
+    timeout: 2000,
+};
+
+fetchRetry(requestParams)
+    .then(res => console.log('Response:', res))
+    .catch(err => console.log('Error:', err));
+
+// function fetchUntil(params: FetchParams & RetryUntilParams) {
+//     const { fetch, cancelFetch } = runFetch(params);
+//     const timerSignals = {
+//         completed() {
+//             cancelFetch();
+//         },
+//     };
+//     const sharedTimerSignals = createSignals(timerSignals);
+//     const { cancel: cancelRetry } = retry.call(sharedTimerSignals, params);
+//     const { cancel: cancelTimer } = timer.call(sharedTimerSignals, { timeout: params.maxTimeout });
+//     const fetchSignals = {
+//         completed() {
+//             cancelRetry();
+//             cancelTimer();
+//         },
+//         terminated() {},
+//         failed() {},
+//     };
+//     return fetch.then(handleResponse.bind(createSignals(fetchSignals)));
+// }

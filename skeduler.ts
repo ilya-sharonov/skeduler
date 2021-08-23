@@ -8,136 +8,88 @@ export const DEFAULT_TIMEOUT_PARAM: TimeoutParams = {
     maxTimeout: DEFAULT_MAX_TIMEOUT,
 };
 
-export const DEFAULT_TIMEOUT_ORIGIN = Symbol.for('DEFAULT_TIMEOUT_ORIGIN');
-export const DEFAULT_RETRY_ORIGIN = Symbol.for('DEFAULT_RETRY_ORIGIN');
+export const DEFAULT_SIGNALS: Signals = {
+    completed() {},
+    failed() {},
+    terminated() {},
+    cancel() {},
+    status() {
+        return {};
+    },
+    next() {},
+};
 
-export enum Sig {
-    Terminate = 'SIGNAL_TERMINATE',
-    Finished = 'SIGNAL_FINISHED',
-    Reschedule = 'SIGNAL_RESCHEDULE',
-    Failed = 'SIGNAL_FAILED',
-}
-export interface Signal<M = number> {
-    type: Sig;
-    origin: Symbol;
-    target: Symbol[];
-    metadata?: M;
-}
-
-export type SignalHandler = (signal: Signal) => void;
-
-export interface Signals {
-    addSignalsListener: (handler: SignalHandler) => void;
-    removeSignalsListener: (handler: SignalHandler) => void;
-    signal: (signal: Signal) => void;
+export interface Signals<C = any, F = any, T = any, S = any> {
+    completed: (payload?: C) => void; // process finished successfully -> time elapsed, action completed etc.
+    failed: (payload?: F) => void; // process failed to perform its operation but can be restarted.
+    terminated: (payload?: T) => void; // process was terminated and must not be restarted with the same params due to constanrt failure.
+    cancel: () => void; // cancel process
+    status: () => S; // get current process status
+    next: () => void; // next iteration
 }
 
-export function initSignals(): Signals {
-    const signalHandlers = new Set<SignalHandler>();
+export function createSignals<C = any, F = any, T = any>(signals: Partial<Signals<C, F, T>> = {}): Signals<C, F, T> {
     return {
-        addSignalsListener(handler) {
-            signalHandlers.add(handler);
-        },
-        removeSignalsListener(handler) {
-            signalHandlers.delete(handler);
-        },
-        signal(sig) {
-            signalHandlers.forEach(handler => handler(sig));
-        },
+        ...DEFAULT_SIGNALS,
+        ...signals,
     };
 }
 
 export function timer(this: Signals, params: TimerParams) {
-    const { timeout: tout, origin = DEFAULT_TIMEOUT_ORIGIN, target = [] } = params;
+    const { timeout: tout } = params;
     const timeout = typeof tout === 'function' ? tout() : tout;
     if (typeof timeout !== 'number' || isNaN(timeout)) {
         throw new Error(`Unexpected timeout value: ${timeout}`);
     }
-    const signalsListener = (signal: Signal) => {
-        if (signal.origin === origin) {
-            return;
-        }
-        if (signal.type === Sig.Terminate && (signal.target.includes(origin) || signal.target.length === 0)) {
-            cancelTimeout();
-            this.removeSignalsListener(signalsListener);
-        }
-    };
-    this.addSignalsListener(signalsListener);
     const onTimeout = () => {
-        this.removeSignalsListener(signalsListener);
-        this.signal({
-            type: Sig.Finished,
-            origin,
-            target,
-        });
+        this.completed();
     };
     const cancelTimeoutHandle = setTimeout(onTimeout, timeout);
     function cancelTimeout() {
         clearTimeout(cancelTimeoutHandle);
     }
+    return createSignals({
+        cancel: cancelTimeout,
+    });
 }
 
 export function retry(this: Signals, params: RetryParams) {
-    const { timeout, maxRetries, origin = DEFAULT_RETRY_ORIGIN, target = [] } = params;
+    const { maxRetries } = params;
     let counter = 0;
-    const timeoutOrigin = Symbol();
-    const retryTarget = Symbol();
+    let timeoutHandle = createSignals();
+    const context = {
+        completed: () => {
+            runRetry();
+        },
+    };
     const startTimeout = () => {
-        timer.call(this, {
-            timeout,
-            origin: timeoutOrigin,
-            target: [retryTarget],
-        });
+        timeoutHandle = timer.call(createSignals(context), params);
     };
-    const signalStopTimeout = () => {
-        this.signal({
-            type: Sig.Terminate,
-            origin: retryTarget,
-            target: [timeoutOrigin],
-        });
+    const stopTimeout = () => {
+        timeoutHandle.cancel();
     };
-    const signalFinished = () => {
-        this.signal({
-            type: Sig.Finished,
-            origin,
-            target,
-        });
+    const signalCompleted = () => {
+        this.completed();
     };
-    const removeListener = () => {
-        this.removeSignalsListener(signalsListener);
+    const signalNext = () => {
+        console.log('Run next', this);
+        this.next();
     };
     function runRetry() {
-        if (++counter < maxRetries || maxRetries < 0) {
+        if (++counter <= maxRetries || maxRetries < 0) {
             startTimeout();
+            if (counter > 1) {
+                signalNext();
+            }
         } else {
-            signalStopTimeout();
-            removeListener();
-            signalFinished();
+            stopTimeout();
+            signalCompleted();
         }
     }
-    function signalsListener(signal: Signal) {
-        if (signal.origin === retryTarget || signal.origin === origin) {
-            return;
-        }
-        switch (signal.type) {
-            case Sig.Finished: {
-                if (signal.origin === timeoutOrigin) {
-                    runRetry();
-                }
-            }
-            case Sig.Terminate: {
-                if (signal.target.includes(origin) || signal.target.length === 0) {
-                    signalStopTimeout();
-                    removeListener();
-                }
-            }
-            default: {
-                return;
-            }
-        }
-    }
-    this.addSignalsListener(signalsListener);
     runRetry();
+    return createSignals({
+        cancel: stopTimeout,
+    });
 }
 
 export function getTimeout({

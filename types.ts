@@ -11,12 +11,7 @@ export type Notify = (cancelTimer?: Cancel) => void;
 export type Remove = () => void;
 export type AddTimer = (cancelTimer: Cancel) => Cancel;
 
-export interface SignalParams {
-    origin?: Symbol;
-    target?: Symbol[];
-}
-
-export interface TimerParams extends SignalParams {
+export interface TimerParams {
     timeout: number | TimeoutFn;
 }
 
