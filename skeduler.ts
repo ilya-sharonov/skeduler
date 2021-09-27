@@ -1,95 +1,93 @@
-import { TimeoutParams, TimerParams, RetryParams, TimeoutFn } from './types';
+import { DEFAULT_MAX_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT_PARAM, Events } from './constants';
+import { TimeoutParams, TimerParams, RetryParams, TimeoutFn, Executor } from './types';
 
-export const DEFAULT_TIMEOUT = 1000;
-export const DEFAULT_MAX_TIMEOUT = 3000;
-
-export const DEFAULT_TIMEOUT_PARAM: TimeoutParams = {
-    baseTimeout: DEFAULT_TIMEOUT,
-    maxTimeout: DEFAULT_MAX_TIMEOUT,
-};
-
-export const DEFAULT_SIGNALS: Signals = {
-    completed() {},
-    failed() {},
-    terminated() {},
-    cancel() {},
-    status() {
-        return {};
-    },
-    next() {},
-};
-
-export interface Signals<C = any, F = any, T = any, S = any> {
-    completed: (payload?: C) => void; // process finished successfully -> time elapsed, action completed etc.
-    failed: (payload?: F) => void; // process failed to perform its operation but can be restarted.
-    terminated: (payload?: T) => void; // process was terminated and must not be restarted with the same params due to constanrt failure.
-    cancel: () => void; // cancel process
-    status: () => S; // get current process status
-    next: () => void; // next iteration
-}
-
-export function createSignals<C = any, F = any, T = any>(signals: Partial<Signals<C, F, T>> = {}): Signals<C, F, T> {
-    return {
-        ...DEFAULT_SIGNALS,
-        ...signals,
-    };
-}
-
-export function timer(this: Signals, params: TimerParams) {
-    const { timeout: tout } = params;
+export function timer(this: Executor, params: TimerParams) {
+    const { timeout: tout, id: timerId } = params;
     const timeout = typeof tout === 'function' ? tout() : tout;
     if (typeof timeout !== 'number' || isNaN(timeout)) {
         throw new Error(`Unexpected timeout value: ${timeout}`);
     }
-    const onTimeout = () => {
-        this.completed();
+
+    this.on(Events.Abort, abort);
+
+    const unsubscribe = () => {
+        this.off(Events.Abort, abort);
     };
+
+    const onTimeout = () => {
+        this.emit(Events.Completed, timerId);
+        unsubscribe();
+    };
+
     const cancelTimeoutHandle = setTimeout(onTimeout, timeout);
     function cancelTimeout() {
         clearTimeout(cancelTimeoutHandle);
     }
-    return createSignals({
-        cancel: cancelTimeout,
-    });
+
+    function abort(id: string) {
+        if (id === timerId) {
+            cancelTimeout();
+            unsubscribe();
+        }
+    }
 }
 
-export function retry(this: Signals, params: RetryParams) {
-    const { maxRetries } = params;
+export function retry(this: Executor, params: RetryParams) {
+    const { maxRetries, id: retryId } = params;
     let counter = 0;
-    let timeoutHandle = createSignals();
-    const context = {
-        completed: () => {
+    // derived ids must be restricted to inner functions use to prevent collisions
+    const timerId = `${retryId}:timer`;
+
+    function onTimerCompleted(id: string) {
+        if (id === timerId) {
             runRetry();
-        },
+        }
+    }
+
+    this.on(Events.Completed, onTimerCompleted);
+    this.on(Events.Abort, abortRetry);
+
+    const unsubscribe = () => {
+        this.off(Events.Completed, onTimerCompleted);
+        this.off(Events.Abort, abortRetry);
     };
+
     const startTimeout = () => {
-        timeoutHandle = timer.call(createSignals(context), params);
+        timer.call(this, { ...params, id: timerId });
     };
     const stopTimeout = () => {
-        timeoutHandle.cancel();
+        this.emit(Events.Abort, timerId);
     };
+
     const signalCompleted = () => {
-        this.completed();
+        this.emit(Events.Completed, retryId);
     };
-    const signalNext = () => {
-        console.log('Run next', this);
-        this.next();
+    const signalNextIteration = () => {
+        this.emit(Events.NextIteration, retryId);
     };
+    const signalStarted = () => {
+        this.emit(Events.Started, retryId);
+    };
+
+    function abortRetry() {
+        stopTimeout();
+        unsubscribe();
+    }
+
     function runRetry() {
         if (++counter <= maxRetries || maxRetries < 0) {
             startTimeout();
-            if (counter > 1) {
-                signalNext();
+            if (counter === 1) {
+                signalStarted();
+            } else {
+                signalNextIteration();
             }
         } else {
-            stopTimeout();
             signalCompleted();
+            abortRetry();
         }
     }
     runRetry();
-    return createSignals({
-        cancel: stopTimeout,
-    });
 }
 
 export function getTimeout({

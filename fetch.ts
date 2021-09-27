@@ -1,5 +1,5 @@
-import { timer, retry, Signals, DEFAULT_TIMEOUT, createSignals, getTimeout } from './skeduler';
-import { TimerParams, RetryParams, RetryUntilParams } from './types';
+import { timer, retry, getTimeout } from './skeduler';
+import { TimerParams, RetryParams, RetryUntilParams, Executor } from './types';
 import fetch from 'node-fetch';
 import AbortController from 'abort-controller';
 
@@ -96,93 +96,33 @@ function handleResponse(this: Signals, response: Response): Response {
     return response;
 }
 
-function* nextFetch(params: FetchParams) {
+function fetchRequest(this: Executor, params: FetchParams) {
     const { url, fetchParams } = params;
-    let abortController: AbortController;
-    let abort = false;
+    const abortController = new AbortController();
 
-    function cancelFetch() {
+    function abort() {
         abortController.abort();
     }
 
-    function produceFetch() {
-        abortController = new AbortController();
-        return {
-            //@ts-ignore
-            fetch: fetch(url, { ...fetchParams, signal: abortController.signal }),
-            cancelFetch,
-        };
+    function onSuccess(response: Response) {}
+
+    function onError(error: any) {
+        if (error instanceof AbortError) {
+        }
     }
 
-    while (!abort) {
-        abort = yield produceFetch();
-    }
-
-    return produceFetch();
-}
-
-function getProxyThis(thisRef: any = {}) {
-    let thisObj = thisRef;
-    const proxyThis = new Proxy<any>(createSignals(thisRef), {
-        get(target: any, prop: string) {
-            if (prop in thisObj) {
-                return thisObj[prop];
-            }
-            return target[prop];
-        },
-    });
-    return [
-        proxyThis,
-        function updateRef(newRef: any) {
-            thisObj = newRef;
-            console.log('Proxy updated', newRef);
-        },
-    ];
+    //@ts-ignore
+    fetch(url, { ...fetchParams, signal: abortController.signal })
+        .then(onSuccess)
+        .catch(onError);
 }
 
 function fetchRetry(params: FetchParams & RetryParams) {
-    const fetching = nextFetch(params);
-    const [proxyThis, updateProxyThis] = getProxyThis();
-    return new Promise((resolve, reject) => {
-        const { cancel: cancelRetry } = retry.call(proxyThis, params);
-        (function runFetch() {
-            console.log('Init fetch...');
-            const {
-                value: { fetch, cancelFetch },
-            } = fetching.next();
-            const timerSignals = {
-                completed() {
-                    cancelFetch();
-                    reject('Timeout');
-                },
-                next() {
-                    console.log('next phase');
-                    cancelFetch();
-                    runFetch();
-                },
-            };
-            updateProxyThis(timerSignals);
-            const fetchSignals = {
-                completed(response: Response) {
-                    cancelRetry();
-                    resolve(response);
-                },
-                terminated(reason: any) {
-                    cancelRetry();
-                    reject(reason);
-                },
-                failed() {
-                    console.log('Fetch failed');
-                },
-            };
-            //@ts-ignore
-            fetch.then(handleResponse.bind(createSignals(fetchSignals))).catch(() => {});
-        })();
-    });
+    return new Promise((resolve, reject) => {});
 }
 
 const requestParams = {
-    url: 'http://www.boogle.com',
+    url: 'http://localhost:4004',
     maxRetries: 3,
     timeout: 2000,
 };
